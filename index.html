@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<!-- ======================================================================
+  KETO & PROGRESSIVE FASTING TRACKER  (installable, no backend)
+  - All data lives in localStorage under one key (see KEY below)
+  - Barcode scanning: html5-qrcode + Open Food Facts (free)
+  - Backup/restore via JSON file; persistent-storage request; offline via sw.js
+  - Host these files together over HTTPS: index.html, manifest.json, sw.js,
+    icon-180.png, icon-192.png, icon-512.png (camera requires HTTPS)
+====================================================================== -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Keto Fast Tracker</title>
+
+<!-- Installable-app files -->
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="KetoFast">
+
+<!-- Free open-source barcode library (pinned version) -->
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+<style>
+/* ---------- Theme tokens (dark, high contrast) ---------- */
+:root{
+  --bg:#0f1115; --card:#181b22; --card2:#20242d; --line:#2b303b;
+  --txt:#f2f4f8; --mute:#8b93a3; --accent:#2ecc8f; --carb:#ff9f43;
+  --pro:#4da3ff; --fat:#b983ff; --danger:#ff5d6c;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;overscroll-behavior:none}
+/* Viewport-locked shell: only #app scrolls */
+#app{height:100dvh;overflow-y:auto;padding:calc(14px + env(safe-area-inset-top)) 14px calc(40px + env(safe-area-inset-bottom));max-width:560px;margin:0 auto}
+h1{font-size:20px;margin:4px 0 2px}
+h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:0 0 10px}
+.sub{color:var(--mute);font-size:13px;margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+.row>*{flex:1;min-width:0}
+label{font-size:11px;color:var(--mute);display:block;margin-bottom:3px}
+/* Finger-friendly controls (min 48px tall) */
+input,select,button{font:inherit;color:var(--txt);border-radius:12px;border:1px solid var(--line);background:var(--card2);min-height:48px;padding:0 12px;width:100%}
+input:focus,select:focus{outline:2px solid var(--accent);border-color:transparent}
+button{cursor:pointer;font-weight:600;background:var(--card2)}
+button:active{transform:scale(.97)}
+.btn-main{background:var(--accent);color:#06251a;border:0}
+.btn-ghost{background:transparent}
+.btn-del{flex:0 0 44px;min-height:40px;padding:0;color:var(--danger);background:transparent;border:0}
+/* Fasting status */
+#fastCard{text-align:center;border-width:2px}
+#fastCard.eating{border-color:var(--accent)} #fastCard.fasting{border-color:var(--carb)}
+#fastStatus{font-weight:800;font-size:17px}
+#countdown{font-size:42px;font-weight:800;font-variant-numeric:tabular-nums;margin:6px 0}
+/* Macro progress bars */
+.bar-head{display:flex;justify-content:space-between;font-size:14px;margin-bottom:5px}
+.bar{height:14px;background:var(--card2);border-radius:99px;overflow:hidden;margin-bottom:13px}
+.bar>i{display:block;height:100%;width:0;border-radius:99px;transition:width .4s}
+.bar.over>i{background:var(--danger)!important}
+/* Lists */
+.item{display:flex;align-items:center;gap:8px;padding:9px 0;border-top:1px solid var(--line);font-size:14px}
+.item .n{flex:1} .item .m{color:var(--mute);font-size:12px}
+/* Hype banner (hidden until weight drops) */
+#hype{display:none;background:linear-gradient(135deg,#ff7a18,#ff3d71,#8e2de2);border-radius:16px;padding:16px;margin-bottom:12px;text-align:center;font-weight:800;font-size:16px;line-height:1.4;animation:pulse 1s infinite alternate}
+@keyframes pulse{to{transform:scale(1.02)}}
+@media (prefers-reduced-motion:reduce){#hype{animation:none}}
+/* Scanner + collapsible settings */
+#reader{display:none;margin-bottom:10px;border-radius:12px;overflow:hidden}
+#settingsBody{display:none} #settingsBody.open{display:block}
+#toast{position:fixed;left:14px;right:14px;top:calc(14px + env(safe-area-inset-top));background:var(--accent);color:#06251a;font-weight:700;padding:14px;border-radius:14px;display:none;z-index:9;text-align:center}
+</style>
+</head>
+<body>
+<div id="toast"></div>
+<div id="app">
+
+  <h1>Keto Fast Tracker</h1>
+  <div class="sub" id="dateLabel"></div>
+
+  <!-- ===== MODULE 1: FASTING STATUS + WEEK SELECTOR ===== -->
+  <div class="card" id="fastCard">
+    <div id="fastStatus"></div>
+    <div id="countdown">--:--:--</div>
+    <div class="sub" id="windowLabel" style="margin:0 0 10px"></div>
+    <label for="weekSel">Active week</label>
+    <select id="weekSel"></select>
+  </div>
+
+  <!-- ===== MODULE 2: DAILY MACRO PROGRESS ===== -->
+  <div class="card">
+    <h2>Today's Intake</h2>
+    <div id="bars"></div>
+  </div>
+
+  <!-- ===== MODULE 3 + 4: LOG FOOD / SCAN / TEMPLATES ===== -->
+  <div class="card">
+    <h2>Log Food</h2>
+    <button class="btn-ghost" id="scanBtn" style="margin-bottom:10px">📷 Scan Barcode</button>
+    <div id="reader"></div>
+    <div class="row"><input id="fName" placeholder="Meal / food name"></div>
+    <div class="row">
+      <div><label>Net carbs (g)</label><input id="fC" type="number" inputmode="decimal" min="0" step="0.1"></div>
+      <div><label>Protein (g)</label><input id="fP" type="number" inputmode="decimal" min="0" step="0.1"></div>
+      <div><label>Fat (g)</label><input id="fF" type="number" inputmode="decimal" min="0" step="0.1"></div>
+    </div>
+    <div class="row" id="gramRow" style="display:none">
+      <div><label>Amount eaten (g) – scanned values are per 100g</label><input id="fG" type="number" inputmode="decimal" value="100" min="1"></div>
+    </div>
+    <div class="row">
+      <button class="btn-main" id="addFood">Add to Log</button>
+      <button id="saveTpl">⭐ Save as Frequent Meal</button>
+    </div>
+    <label>Quick-add a frequent meal</label>
+    <div class="row">
+      <select id="tplSel" style="flex:3"></select>
+      <button id="tplAdd" class="btn-main" style="flex:1">Add</button>
+      <button id="tplDel" class="btn-ghost" style="flex:0 0 52px;color:var(--danger)">🗑</button>
+    </div>
+    <div id="foodList"></div>
+  </div>
+
+  <!-- ===== MODULE 5a: HYDRATION ===== -->
+  <div class="card">
+    <h2>Hydration</h2>
+    <div style="font-size:26px;font-weight:800;margin-bottom:8px"><span id="waterTot">0</span> oz</div>
+    <div class="row">
+      <button class="btn-main" data-water="8">+8 oz</button>
+      <button class="btn-main" data-water="16">+16 oz</button>
+      <button class="btn-ghost" data-water="-8" style="flex:0 0 70px">−8</button>
+    </div>
+  </div>
+
+  <!-- ===== MODULE 5b: EXERCISE ===== -->
+  <div class="card">
+    <h2>Exercise Diary</h2>
+    <div class="row">
+      <input id="exName" placeholder="Workout name" style="flex:2">
+      <input id="exCal" type="number" inputmode="numeric" placeholder="kcal">
+    </div>
+    <button class="btn-main" id="exAdd">Add Workout</button>
+    <div id="exList"></div>
+  </div>
+
+  <!-- ===== MODULE 5c: SCALE + HYPE MACHINE + REMINDER ===== -->
+  <div id="hype"></div>
+  <div class="card">
+    <h2>Scale Progress</h2>
+    <div class="row">
+      <input id="wIn" type="number" inputmode="decimal" step="0.1" placeholder="Weight (lbs)" style="flex:2">
+      <button class="btn-main" id="wAdd">Log</button>
+    </div>
+    <div id="wList"></div>
+    <label style="margin-top:12px">Weigh-in reminder</label>
+    <div class="row">
+      <input id="remTime" type="time">
+      <select id="remFreq">
+        <option>Daily</option><option>Every 3 days</option><option>Weekly</option>
+      </select>
+    </div>
+    <div class="sub" id="remLabel" style="margin:0"></div>
+  </div>
+
+  <!-- ===== BACKUP & RESTORE ===== -->
+  <div class="card">
+    <h2>Backup &amp; Restore</h2>
+    <div class="sub" id="bkLabel"></div>
+    <div class="row">
+      <button class="btn-main" id="bkExport">⬇️ Export Backup</button>
+      <button id="bkImport">⬆️ Import Backup</button>
+    </div>
+    <input type="file" id="bkFile" accept="application/json,.json" hidden>
+  </div>
+
+  <!-- ===== MODULE 6: COLLAPSIBLE SETTINGS ===== -->
+  <div class="card">
+    <button id="settingsToggle" class="btn-ghost">⚙️ App Settings</button>
+    <div id="settingsBody" style="margin-top:12px">
+      <h2>Daily Maximums</h2>
+      <div class="row">
+        <div><label>Net carbs (g)</label><input id="sC" type="number" inputmode="decimal"></div>
+        <div><label>Protein (g)</label><input id="sP" type="number" inputmode="decimal"></div>
+        <div><label>Fat (g)</label><input id="sF" type="number" inputmode="decimal"></div>
+      </div>
+      <h2 style="margin-top:14px">Fasting</h2>
+      <div class="row"><div><label>Bedtime cutoff (caps weeks 1–5)</label><input id="sBed" type="time"></div></div>
+      <div id="weekCfg"></div>
+      <button class="btn-main" id="saveGoals" style="margin-top:8px">Save Goals</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+   STATE + PERSISTENCE (everything is saved to localStorage)
+========================================================================== */
+const KEY = 'ketoFastTracker.v1';
+const $ = id => document.getElementById(id);
+
+// Default data: used on first run and to fill any missing fields later
+const DEFAULTS = {
+  settings: {
+    carb: 20, protein: 90, fat: 120,      // daily maximums
+    bedtime: '20:00',                     // global eating-window cap (weeks 1-5)
+    week: 0,                              // active week index (0-5)
+    reminderTime: '08:00', reminderFreq: 'Daily', lastBackup: '',
+    weeks: [
+      {meals:2, start:'11:00', end:'20:00'},
+      {meals:2, start:'12:00', end:'20:00'},
+      {meals:2, start:'13:00', end:'20:00'},
+      {meals:2, start:'14:00', end:'20:00'},
+      {meals:2, start:'15:00', end:'20:00'},
+      {meals:1, start:'16:00', end:'17:00'}   // Week 6 = OMAD
+    ]
+  },
+  day: {date:'', foods:[], water:0, exercise:[]},  // wiped each new calendar day
+  templates: [],                                   // permanent frequent meals
+  weights: []                                      // permanent [{date, lbs}]
+};
+
+let S = load();
+
+function load(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(KEY)) || {};
+    // shallow-merge so new fields added in future versions get defaults
+    return {
+      settings: Object.assign(JSON.parse(JSON.stringify(DEFAULTS.settings)), saved.settings || {}),
+      day: Object.assign({}, DEFAULTS.day, saved.day || {}),
+      templates: saved.templates || [],
+      weights: saved.weights || []
+    };
+  }catch(e){ return JSON.parse(JSON.stringify(DEFAULTS)); }
+}
+function save(){ try{ localStorage.setItem(KEY, JSON.stringify(S)); }catch(e){ toast('⚠️ Storage full or blocked'); } }
+
+/* ---------- Helpers ---------- */
+const pad = n => String(n).padStart(2,'0');
+const todayStr = () => { const d=new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const toMin = t => { const [h,m]=t.split(':').map(Number); return h*60+m; };
+const minToStr = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
+const fmt12 = t => { let [h,m]=t.split(':').map(Number); const ap=h>=12?'PM':'AM'; h=h%12||12; return `${h}:${pad(m)} ${ap}`; };
+const esc = s => String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const r1 = n => Math.round(n*10)/10;
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block'; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display='none',5000); }
+
+/* ---------- Automatic daily reset ----------
+   New calendar day => clear food/water/exercise; keep settings, templates, weights */
+function checkNewDay(){
+  if (S.day.date !== todayStr()){
+    S.day = {date: todayStr(), foods:[], water:0, exercise:[]};
+    save(); renderAll();
+  }
+}
+
+/* ==========================================================================
+   MODULE 1: FASTING WINDOW + LIVE COUNTDOWN
+========================================================================== */
+// Effective window for a week: weeks 1-5 are capped by the Bedtime Cutoff
+function getWindow(i){
+  const w = S.settings.weeks[i];
+  let start = toMin(w.start), end = toMin(w.end);
+  if (i < 5) end = Math.min(end, toMin(S.settings.bedtime));
+  return {start, end};
+}
+function tick(){
+  checkNewDay();
+  const now = new Date();
+  const nowSec = now.getHours()*3600 + now.getMinutes()*60 + now.getSeconds();
+  const {start, end} = getWindow(S.settings.week);
+  const eating = nowSec >= start*60 && nowSec < end*60;
+  let remain;
+  if (eating) remain = end*60 - nowSec;                          // time until window closes
+  else if (nowSec < start*60) remain = start*60 - nowSec;        // later today
+  else remain = 86400 - nowSec + start*60;                       // tomorrow's start
+  const h=Math.floor(remain/3600), m=Math.floor(remain%3600/60), s=remain%60;
+  $('countdown').textContent = `${pad(h)}:${pad(m)}:${pad(s)}`;
+  $('fastStatus').textContent = eating ? '🍽️ EATING WINDOW RUNNING' : '⏳ CURRENTLY FASTING';
+  $('fastStatus').style.color = eating ? 'var(--accent)' : 'var(--carb)';
+  $('fastCard').className = 'card ' + (eating ? 'eating' : 'fasting');
+  $('windowLabel').textContent = (eating ? 'Window closes in · ' : 'Eating starts in · ') +
+    `${fmt12(minToStr(start))} – ${fmt12(minToStr(end))}` + (S.settings.week===5 ? ' · OMAD' : '');
+  checkReminder(now);
+}
+
+/* ==========================================================================
+   MODULE 2: MACRO TOTALS + PROGRESS BARS
+========================================================================== */
+function totals(){
+  return S.day.foods.reduce((t,f)=>({c:t.c+f.c, p:t.p+f.p, f:t.f+f.f}), {c:0,p:0,f:0});
+}
+function renderBars(){
+  const t = totals(), g = S.settings;
+  const defs = [
+    ['Net Carbs', t.c, g.carb,    'var(--carb)'],
+    ['Protein',   t.p, g.protein, 'var(--pro)'],
+    ['Fat',       t.f, g.fat,     'var(--fat)']
+  ];
+  $('bars').innerHTML = defs.map(([n,v,max,col])=>{
+    const pct = max>0 ? Math.min(100, v/max*100) : 0;
+    return `<div class="bar-head"><b>${n}</b><span>${r1(v)} / ${max} g</span></div>
+            <div class="bar ${v>max?'over':''}"><i style="width:${pct}%;background:${col}"></i></div>`;
+  }).join('');
+}
+
+/* ==========================================================================
+   FOOD LOG, FREQUENT MEALS (MODULE 4)
+========================================================================== */
+let scanned = null;   // per-100g values from last barcode scan (for gram scaling)
+
+function addFood(name,c,p,f){
+  S.day.foods.push({name: name||'Food', c:+c||0, p:+p||0, f:+f||0});
+  save(); renderAll();
+}
+$('addFood').onclick = () => {
+  addFood($('fName').value.trim(), $('fC').value, $('fP').value, $('fF').value);
+  ['fName','fC','fP','fF'].forEach(i=>$(i).value='');
+  scanned = null; $('gramRow').style.display='none'; $('fG').value=100;
+};
+$('saveTpl').onclick = () => {
+  const name = $('fName').value.trim();
+  if(!name) return toast('Enter a meal name first');
+  S.templates.push({name, c:+$('fC').value||0, p:+$('fP').value||0, f:+$('fF').value||0});
+  save(); renderTemplates(); toast('⭐ Saved to frequent meals');
+};
+$('tplAdd').onclick = () => {
+  const t = S.templates[$('tplSel').value];
+  if(t) addFood(t.name, t.c, t.p, t.f);
+};
+$('tplDel').onclick = () => {
+  const i = $('tplSel').value;
+  if(S.templates[i] && confirm('Delete "'+S.templates[i].name+'"?')){ S.templates.splice(i,1); save(); renderTemplates(); }
+};
+function renderTemplates(){
+  $('tplSel').innerHTML = S.templates.length
+    ? S.templates.map((t,i)=>`<option value="${i}">${esc(t.name)} (${r1(t.c)}c/${r1(t.p)}p/${r1(t.f)}f)</option>`).join('')
+    : '<option value="">No saved meals yet</option>';
+}
+function renderFoods(){
+  $('foodList').innerHTML = S.day.foods.map((f,i)=>
+    `<div class="item"><div class="n">${esc(f.name)}<div class="m">${r1(f.c)}c · ${r1(f.p)}p · ${r1(f.f)}f</div></div>
+     <button class="btn-del" data-delfood="${i}">✕</button></div>`).join('');
+}
+
+/* ==========================================================================
+   MODULE 3: BARCODE SCANNER (html5-qrcode + Open Food Facts)
+========================================================================== */
+let scanner = null;
+$('scanBtn').onclick = async () => {
+  if (scanner){ return stopScan(); }                       // second tap cancels
+  if (typeof Html5Qrcode === 'undefined') return toast('Scanner library failed to load (check connection)');
+  $('reader').style.display='block'; $('scanBtn').textContent='✖ Stop Scanning';
+  scanner = new Html5Qrcode('reader');
+  try{
+    // Triggers the browser's camera permission prompt
+    await scanner.start({facingMode:'environment'}, {fps:10, qrbox:{width:260,height:140}}, onScan, ()=>{});
+  }catch(e){
+    toast('Camera unavailable: allow permission and use HTTPS'); stopScan();
+  }
+};
+async function stopScan(){
+  try{ if(scanner){ await scanner.stop(); scanner.clear(); } }catch(e){}
+  scanner = null; $('reader').style.display='none'; $('scanBtn').textContent='📷 Scan Barcode';
+}
+async function onScan(code){
+  await stopScan();
+  toast('Looking up '+code+'…');
+  try{
+    const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,nutriments`);
+    const data = await res.json();
+    if (data.status !== 1) return toast('Product not found – enter manually');
+    const n = data.product.nutriments || {};
+    // Per 100g. Net carbs = carbs minus fiber (keto standard).
+    const carbs = Math.max(0, (n.carbohydrates_100g||0) - (n.fiber_100g||0));
+    scanned = {c:carbs, p:n.proteins_100g||0, f:n.fat_100g||0};
+    $('fName').value = data.product.product_name || 'Scanned item';
+    $('gramRow').style.display='flex'; $('fG').value = 100;
+    applyGrams();
+    toast('✅ Found: '+$('fName').value+' (values per 100g)');
+  }catch(e){ toast('Lookup failed – check your connection'); }
+}
+// Scale scanned per-100g values by grams actually eaten
+function applyGrams(){
+  if(!scanned) return;
+  const k = (+$('fG').value||0)/100;
+  $('fC').value = r1(scanned.c*k); $('fP').value = r1(scanned.p*k); $('fF').value = r1(scanned.f*k);
+}
+$('fG').oninput = applyGrams;
+
+/* ==========================================================================
+   MODULE 5: WATER, EXERCISE, WEIGHT + HYPE
+========================================================================== */
+document.addEventListener('click', e => {
+  const w = e.target.dataset.water;
+  if (w){ S.day.water = Math.max(0, S.day.water + +w); save(); renderAll(); }
+  const d = e.target.dataset.delfood; if (d!==undefined){ S.day.foods.splice(d,1); save(); renderAll(); }
+  const x = e.target.dataset.delex;   if (x!==undefined){ S.day.exercise.splice(x,1); save(); renderAll(); }
+});
+$('exAdd').onclick = () => {
+  const name = $('exName').value.trim();
+  if(!name) return toast('Name your workout');
+  S.day.exercise.push({name, cal:+$('exCal').value||0});
+  $('exName').value=''; $('exCal').value=''; save(); renderAll();
+};
+function renderExercise(){
+  const burned = S.day.exercise.reduce((a,x)=>a+x.cal,0);
+  $('exList').innerHTML = S.day.exercise.map((x,i)=>
+    `<div class="item"><div class="n">${esc(x.name)}<div class="m">${x.cal} kcal</div></div>
+     <button class="btn-del" data-delex="${i}">✕</button></div>`).join('') +
+    (burned ? `<div class="sub" style="margin:8px 0 0">Total burned: <b>${burned}</b> kcal</div>` : '');
+}
+$('wAdd').onclick = () => {
+  const lbs = parseFloat($('wIn').value);
+  if(!(lbs>0)) return toast('Enter your weight in lbs');
+  const last = S.weights.length ? S.weights[S.weights.length-1].lbs : null;  // compare to LAST entry
+  S.weights.push({date: todayStr(), lbs});
+  save(); $('wIn').value=''; renderWeights();
+  const hype = $('hype');
+  if (last !== null && lbs < last){
+    const lost = r1(last - lbs);
+    hype.innerHTML = `🔥🏆 YOU'RE CRUSHING IT!!! 🏆🔥<br>You just LOST ${lost} lb${lost===1?'':'s'}! (${last} → ${lbs})<br>
+      Congratulations — that's what COMMITMENT to your progressive fasting windows looks like!
+      Every fasted hour is paying off. Keep that momentum rolling! 💪🚀`;
+    hype.style.display='block'; hype.scrollIntoView({behavior:'smooth',block:'center'});
+    if (navigator.vibrate) navigator.vibrate([100,50,100,50,200]);
+  } else hype.style.display='none';   // banner stays hidden unless weight dropped
+};
+$('hype').onclick = () => $('hype').style.display='none';   // tap to dismiss
+function renderWeights(){
+  const w = S.weights.slice(-5).reverse();
+  $('wList').innerHTML = w.map(x=>`<div class="item"><div class="n">${x.lbs} lbs</div><div class="m">${x.date}</div></div>`).join('');
+}
+
+/* ---------- Weigh-in reminder (fires while the app is open) ---------- */
+let lastRemindDay = '';
+const FREQ_DAYS = {'Daily':1, 'Every 3 days':3, 'Weekly':7};
+$('remTime').onchange = $('remFreq').onchange = () => {
+  S.settings.reminderTime = $('remTime').value; S.settings.reminderFreq = $('remFreq').value;
+  save(); renderReminder();
+};
+function renderReminder(){
+  $('remLabel').textContent = `⏰ ${S.settings.reminderFreq} weigh-in reminder at ${fmt12(S.settings.reminderTime)}`;
+}
+function checkReminder(now){
+  const hhmm = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  if (hhmm !== S.settings.reminderTime || lastRemindDay === todayStr()) return;
+  const last = S.weights.length ? new Date(S.weights[S.weights.length-1].date+'T00:00') : null;
+  const days = last ? (now - last)/86400000 : 999;
+  if (days >= FREQ_DAYS[S.settings.reminderFreq]){
+    lastRemindDay = todayStr(); toast('⚖️ Time to log your weight!');
+    if (window.Notification && Notification.permission==='granted') new Notification('Log your weight ⚖️');
+  }
+}
+
+/* ==========================================================================
+   MODULE 6: SETTINGS PANEL
+========================================================================== */
+$('settingsToggle').onclick = () => $('settingsBody').classList.toggle('open');
+function renderSettings(){
+  const g = S.settings;
+  $('sC').value=g.carb; $('sP').value=g.protein; $('sF').value=g.fat; $('sBed').value=g.bedtime;
+  $('weekCfg').innerHTML = g.weeks.map((w,i)=>
+    `<label style="margin-top:8px">Week ${i+1}${i===5?' (OMAD – 1 meal)':' – 2 meals'}</label>
+     <div class="row"><input type="time" id="ws${i}" value="${w.start}"><input type="time" id="we${i}" value="${w.end}"></div>`).join('');
+}
+$('saveGoals').onclick = () => {
+  const g = S.settings;
+  g.carb=+$('sC').value||0; g.protein=+$('sP').value||0; g.fat=+$('sF').value||0;
+  g.bedtime = $('sBed').value || '20:00';
+  g.weeks.forEach((w,i)=>{ w.start=$(`ws${i}`).value||w.start; w.end=$(`we${i}`).value||w.end; });
+  save(); renderAll(); toast('✅ Goals saved');
+  if (window.Notification && Notification.permission==='default') Notification.requestPermission();
+};
+$('weekSel').onchange = () => { S.settings.week = +$('weekSel').value; save(); renderAll(); };
+function renderWeekSelect(){
+  $('weekSel').innerHTML = S.settings.weeks.map((w,i)=>{
+    const win = getWindow(i);
+    return `<option value="${i}" ${i===S.settings.week?'selected':''}>Week ${i+1}${i===5?' (OMAD)':''} · ${fmt12(minToStr(win.start))}–${fmt12(minToStr(win.end))}</option>`;
+  }).join('');
+}
+
+/* ==========================================================================
+   BACKUP / RESTORE + PERSISTENT STORAGE + SERVICE WORKER
+========================================================================== */
+// Ask the browser not to evict our data when storage runs low
+let persisted = false;
+async function requestPersist(){
+  try{ if(navigator.storage && navigator.storage.persist){
+    persisted = await navigator.storage.persisted() || await navigator.storage.persist();
+  } }catch(e){}
+  renderBackup();
+}
+// Label shows last backup date and whether storage is protected
+function daysSinceBackup(){
+  if(!S.settings.lastBackup) return Infinity;
+  return (new Date(todayStr()+'T00:00') - new Date(S.settings.lastBackup+'T00:00'))/86400000;
+}
+function renderBackup(){
+  const lb = S.settings.lastBackup;
+  $('bkLabel').textContent = (lb ? `Last backup: ${lb}` : 'No backup yet') +
+    (persisted ? ' · 🔒 storage protected' : '');
+}
+// EXPORT: share sheet when available (save to Files/Drive), else normal download
+$('bkExport').onclick = async () => {
+  const payload = JSON.stringify({app:'ketoFastTracker', version:1, exported:new Date().toISOString(), data:S}, null, 1);
+  const name = `keto-backup-${todayStr()}.json`;
+  const file = new File([payload], name, {type:'application/json'});
+  try{
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file], title:'Keto Fast Tracker backup'});
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(file); a.download = name; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    }
+    S.settings.lastBackup = todayStr(); save(); renderBackup(); toast('✅ Backup exported');
+  }catch(e){ /* user cancelled the share sheet */ }
+};
+// IMPORT: validate the file, confirm, then replace everything
+$('bkImport').onclick = () => $('bkFile').click();
+$('bkFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if(!f) return;
+  try{
+    const parsed = JSON.parse(await f.text());
+    const d = parsed && parsed.data;
+    const ok = parsed && parsed.app==='ketoFastTracker' && d && d.settings &&
+      Array.isArray(d.settings.weeks) && d.settings.weeks.length===6 &&
+      Array.isArray(d.weights) && Array.isArray(d.templates);
+    if(!ok) return toast('⚠️ Not a valid backup file');
+    if(!confirm('Replace ALL current data with this backup?')) return;
+    localStorage.setItem(KEY, JSON.stringify(d));
+    S = load(); checkNewDay(); renderAll(); toast('✅ Backup restored');
+  }catch(err){ toast('⚠️ Could not read that file'); }
+};
+// Nudge if it's been 7+ days (only once there is data worth saving)
+function backupNudge(){
+  if(daysSinceBackup() >= 7 && (S.weights.length || S.templates.length)){
+    setTimeout(()=>toast("💾 It's been a while: export a backup in the Backup card"), 2500);
+  }
+}
+// Register the service worker so the app opens offline
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
+
+/* ==========================================================================
+   RENDER + BOOT
+========================================================================== */
+function renderAll(){
+  $('dateLabel').textContent = new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+  renderWeekSelect(); renderBars(); renderFoods(); renderTemplates();
+  $('waterTot').textContent = S.day.water;
+  renderExercise(); renderWeights(); renderSettings(); renderBackup();
+  $('remTime').value = S.settings.reminderTime; $('remFreq').value = S.settings.reminderFreq;
+  renderReminder(); tick();
+}
+checkNewDay();                       // reset day data if the date rolled over
+renderAll();
+requestPersist();                    // ask the browser to protect our storage
+backupNudge();                       // remind about backups after 7+ days
+setInterval(tick, 1000);             // live countdown + midnight rollover check
+document.addEventListener('visibilitychange', () => { if(!document.hidden) checkNewDay(); });
+</script>
+</body>
+</html>
